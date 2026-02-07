@@ -53,6 +53,7 @@ export default function HomePage() {
   const xummRef = useRef<Xumm | null>(null);
   const [connectedAccount, setConnectedAccount] = useState<string>('');
   const [pendingRole, setPendingRole] = useState<'lender' | 'borrower' | null>(null);
+  const connectRoleRef = useRef<'lender' | 'borrower' | null>(null);
   const [loan, setLoan] = useState<Loan | null>(null);
   const [loanId, setLoanId] = useState<string>('');
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -78,14 +79,15 @@ export default function HomePage() {
         void xummRef.current?.user?.account?.then((account) => {
           if (account) {
             setConnectedAccount(account);
-            if (pendingRole === 'lender') {
+            const role = connectRoleRef.current;
+            if (role === 'lender') {
               updateLoan((prev) => ({
                 ...prev,
                 lenderAddress: account
               }));
               setLenderInput(account);
             }
-            if (pendingRole === 'borrower') {
+            if (role === 'borrower') {
               updateLoan((prev) => ({
                 ...prev,
                 borrowerAddress: account
@@ -93,6 +95,7 @@ export default function HomePage() {
               setBorrowerInput(account);
             }
             setPendingRole(null);
+            connectRoleRef.current = null;
           }
         });
       });
@@ -175,6 +178,51 @@ export default function HomePage() {
     setLog((prev) => [entry, ...prev].slice(0, 6));
   };
 
+  const ensureLoanForActions = () => {
+    if (loan) return loan;
+    if (!lenderInput || !borrowerInput) {
+      return null;
+    }
+    const due = minutesFromNowRipple(Number(dueMinutes || DEFAULT_DUE_MINUTES));
+    const cancel = minutesFromNowRipple(
+      Number(dueMinutes || DEFAULT_DUE_MINUTES) + Number(graceMinutes || DEFAULT_GRACE_MINUTES)
+    );
+    const id = crypto.randomUUID();
+    const created: Loan = {
+      id,
+      lenderAddress: lenderInput,
+      borrowerAddress: borrowerInput,
+      currencyCode: DEFAULT_CURRENCY,
+      creditAmount: creditAmount,
+      collateralXrpDrops: xrpToDrops(collateralXrp),
+      repayXrpDrops: xrpToDrops(repayXrp),
+      dueFinishAfter: due,
+      cancelAfter: cancel,
+      status: 'OFFERED'
+    };
+    setLoan(created);
+    setLoanId(id);
+    return created;
+  };
+
+  const requireSigner = (expected: string, label: string) => {
+    if (!expected) {
+      setStatusMessage(`Missing ${label} address.`);
+      return false;
+    }
+    if (!connectedAccount) {
+      setStatusMessage(`Connect the ${label} wallet first.`);
+      return false;
+    }
+    if (connectedAccount !== expected) {
+      setStatusMessage(
+        `Wrong wallet connected. Expected ${label} ${expected.slice(0, 6)}…${expected.slice(-4)}.`
+      );
+      return false;
+    }
+    return true;
+  };
+
   const updateLoan = (updater: (prev: Loan) => Loan) => {
     setLoan((prev) => (prev ? updater(prev) : prev));
   };
@@ -225,6 +273,7 @@ export default function HomePage() {
       return;
     }
     setPendingRole(role);
+    connectRoleRef.current = role;
     try {
       await xummRef.current?.authorize();
     } catch (error) {
@@ -261,7 +310,7 @@ export default function HomePage() {
     setPendingPayload(payload.created);
 
     const resolved = await payload.resolved;
-    if (!resolved.signed) {
+    if (!resolved || !resolved.signed) {
       setStatusMessage('Signature declined.');
       return null;
     }
@@ -272,17 +321,19 @@ export default function HomePage() {
   };
 
   const signTrustline = async () => {
-    if (!loan?.lenderAddress || !loan?.borrowerAddress) {
+    const activeLoan = ensureLoanForActions();
+    if (!activeLoan?.lenderAddress || !activeLoan?.borrowerAddress) {
       setStatusMessage('Missing lender or borrower address.');
       return;
     }
-    const creditLimit = (Number(loan.creditAmount) * 2).toString();
+    if (!requireSigner(activeLoan.borrowerAddress, 'borrower')) return;
+    const creditLimit = (Number(activeLoan.creditAmount) * 2).toString();
     const tx = {
       TransactionType: 'TrustSet',
-      Account: loan.borrowerAddress,
+      Account: activeLoan.borrowerAddress,
       LimitAmount: {
-        currency: loan.currencyCode,
-        issuer: loan.lenderAddress,
+        currency: activeLoan.currencyCode,
+        issuer: activeLoan.lenderAddress,
         value: creditLimit
       }
     };
@@ -291,14 +342,16 @@ export default function HomePage() {
   };
 
   const signEscrowCreate = async () => {
-    if (!loan?.lenderAddress || !loan?.borrowerAddress) return;
+    const activeLoan = ensureLoanForActions();
+    if (!activeLoan?.lenderAddress || !activeLoan?.borrowerAddress) return;
+    if (!requireSigner(activeLoan.borrowerAddress, 'borrower')) return;
     const tx = {
       TransactionType: 'EscrowCreate',
-      Account: loan.borrowerAddress,
-      Amount: loan.collateralXrpDrops,
-      Destination: loan.lenderAddress,
-      FinishAfter: loan.dueFinishAfter,
-      CancelAfter: loan.cancelAfter
+      Account: activeLoan.borrowerAddress,
+      Amount: activeLoan.collateralXrpDrops,
+      Destination: activeLoan.lenderAddress,
+      FinishAfter: activeLoan.dueFinishAfter,
+      CancelAfter: activeLoan.cancelAfter
     };
     const result = await requestSignature(tx, 'EscrowCreate');
     if (!result?.txid) return;
@@ -322,15 +375,17 @@ export default function HomePage() {
   };
 
   const signCreditIssue = async () => {
-    if (!loan?.lenderAddress || !loan?.borrowerAddress) return;
+    const activeLoan = ensureLoanForActions();
+    if (!activeLoan?.lenderAddress || !activeLoan?.borrowerAddress) return;
+    if (!requireSigner(activeLoan.lenderAddress, 'lender')) return;
     const tx = {
       TransactionType: 'Payment',
-      Account: loan.lenderAddress,
-      Destination: loan.borrowerAddress,
+      Account: activeLoan.lenderAddress,
+      Destination: activeLoan.borrowerAddress,
       Amount: {
-        currency: loan.currencyCode,
-        issuer: loan.lenderAddress,
-        value: loan.creditAmount
+        currency: activeLoan.currencyCode,
+        issuer: activeLoan.lenderAddress,
+        value: activeLoan.creditAmount
       }
     };
     const result = await requestSignature(tx, 'Issue CREDIT');
@@ -344,12 +399,14 @@ export default function HomePage() {
   };
 
   const signRepayment = async () => {
-    if (!loan?.lenderAddress || !loan?.borrowerAddress) return;
+    const activeLoan = ensureLoanForActions();
+    if (!activeLoan?.lenderAddress || !activeLoan?.borrowerAddress) return;
+    if (!requireSigner(activeLoan.borrowerAddress, 'borrower')) return;
     const tx = {
       TransactionType: 'Payment',
-      Account: loan.borrowerAddress,
-      Destination: loan.lenderAddress,
-      Amount: loan.repayXrpDrops
+      Account: activeLoan.borrowerAddress,
+      Destination: activeLoan.lenderAddress,
+      Amount: activeLoan.repayXrpDrops
     };
     const result = await requestSignature(tx, 'Repay XRP');
     if (!result?.txid) return;
@@ -367,6 +424,7 @@ export default function HomePage() {
       setStatusMessage('Missing escrow sequence.');
       return;
     }
+    if (!requireSigner(loan.borrowerAddress, 'borrower')) return;
     const tx = {
       TransactionType: 'EscrowCancel',
       Account: loan.borrowerAddress,
@@ -379,6 +437,7 @@ export default function HomePage() {
 
   const signEscrowFinish = async () => {
     if (!loan?.lenderAddress || !loan?.borrowerAddress || !loan?.escrowOfferSequence) return;
+    if (!requireSigner(loan.lenderAddress, 'lender')) return;
     const tx = {
       TransactionType: 'EscrowFinish',
       Account: loan.lenderAddress,
@@ -422,6 +481,14 @@ export default function HomePage() {
       <section className="grid">
         <div className="card">
           <div className="section-title">Lender Panel</div>
+          <div className="notice">
+            Connected as:{' '}
+            {connectedAccount && connectedAccount === lenderInput
+              ? 'Lender'
+              : connectedAccount
+                ? 'Other wallet'
+                : 'Not connected'}
+          </div>
           <div className="label">Lender address</div>
           <input
             className="input"
@@ -434,7 +501,16 @@ export default function HomePage() {
             placeholder="r..."
           />
           <div className="row">
-            <button className="button" onClick={() => connectWallet('lender')}>
+            <button
+              className="button"
+              onClick={() => connectWallet('lender')}
+              disabled={Boolean(connectedAccount && connectedAccount !== lenderInput)}
+              title={
+                connectedAccount && connectedAccount !== lenderInput
+                  ? 'Disconnect or use the lender wallet to connect here.'
+                  : undefined
+              }
+            >
               Connect as lender
             </button>
           </div>
@@ -524,6 +600,14 @@ export default function HomePage() {
 
         <div className="card">
           <div className="section-title">Borrower Panel</div>
+          <div className="notice">
+            Connected as:{' '}
+            {connectedAccount && connectedAccount === borrowerInput
+              ? 'Borrower'
+              : connectedAccount
+                ? 'Other wallet'
+                : 'Not connected'}
+          </div>
           <div className="label">Borrower address</div>
           <input
             className="input"
@@ -536,7 +620,16 @@ export default function HomePage() {
             placeholder="r..."
           />
           <div className="row">
-            <button className="button" onClick={() => connectWallet('borrower')}>
+            <button
+              className="button"
+              onClick={() => connectWallet('borrower')}
+              disabled={Boolean(connectedAccount && connectedAccount !== borrowerInput)}
+              title={
+                connectedAccount && connectedAccount !== borrowerInput
+                  ? 'Disconnect or use the borrower wallet to connect here.'
+                  : undefined
+              }
+            >
               Connect as borrower
             </button>
           </div>
