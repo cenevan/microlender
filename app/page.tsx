@@ -6,7 +6,7 @@ import { getClient, minutesFromNowRipple } from '../lib/xrpl';
 import type { Loan, LoanStatus } from '../lib/loan';
 import { loanStorageKey } from '../lib/loan';
 
-const DEFAULT_CURRENCY = 'CREDIT';
+const DEFAULT_CURRENCY = 'CRD';
 const DEFAULT_CREDIT_AMOUNT = '100';
 const DEFAULT_COLLATERAL_XRP = '5';
 const DEFAULT_REPAY_XRP = '5.2';
