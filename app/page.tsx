@@ -13,6 +13,11 @@ const DEFAULT_REPAY_XRP = '5.2';
 const DEFAULT_DUE_MINUTES = 10;
 const DEFAULT_GRACE_MINUTES = 10;
 
+if (typeof window !== 'undefined' && typeof (window as any).setImmediate === 'undefined') {
+  (window as any).setImmediate = (fn: (...args: any[]) => void, ...args: any[]) =>
+    window.setTimeout(fn, 0, ...args);
+}
+
 const xrpToDrops = (xrp: string) => {
   const value = Number(xrp);
   if (!Number.isFinite(value)) return '0';
